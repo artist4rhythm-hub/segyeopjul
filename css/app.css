@@ -161,6 +161,25 @@ td.num, th:nth-child(2), th:nth-child(3) { text-align: center; width: 40px; }
 .talk .title { font-size: 28px; }
 .sum-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; border-bottom: 1px solid #edf2ee; font-size: 14px; }
 
+/* 보안 안내 */
+.privacy { margin-top: 16px; }
+.privacy summary { cursor: pointer; font-weight: 700; min-height: 32px; display: flex; align-items: center; color: var(--green-d); list-style: none; }
+.privacy summary::-webkit-details-marker { display: none; }
+.privacy summary::after { content: "+"; margin-left: auto; font-size: 20px; color: var(--muted); }
+.privacy[open] summary::after { content: "−"; }
+.pv-row { display: grid; grid-template-columns: 88px 1fr; gap: 10px; padding: 10px 0; border-top: 1px solid #edf2ee; font-size: 14px; }
+.pv-row:first-of-type { margin-top: 8px; }
+.pv-row p { margin: 0; }
+.pv-tag { align-self: start; text-align: center; font-size: 12px; font-weight: 700; border-radius: 99px; padding: 3px 6px; }
+.pv-tag.both { background: var(--green-l); color: var(--green-d); }
+.pv-tag.cond { background: var(--gold-l); color: var(--gold-d); }
+.pv-tag.me { background: #e6ece8; color: var(--ink); }
+.pv-tag.op { background: #f8e4df; color: var(--danger); }
+.login .privacy { text-align: left; }
+.pv-foot { margin-top: 10px; }
+.lock { border: 1px solid var(--gold); }
+.warn { margin: 0; font-size: 14px; color: var(--gold-d); font-weight: 700; }
+
 /* 아래 탭 */
 .tabs { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; background: rgba(255, 255, 255, .96); border-top: 1px solid var(--line); padding: 4px 4px calc(6px + env(safe-area-inset-bottom)); backdrop-filter: blur(8px); z-index: 10; }
 .tabs[hidden] { display: none; }

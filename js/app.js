@@ -29,6 +29,7 @@ const S = {
   tab: 'home', sub: null,      // sub: { type, ... }
   check: { mine: null, partner: null, draft: {} },
   promiseView: 'mine', editing: null, talkStep: 0, confirmDelete: false,
+  myNotesRaw: [], noteKey: null, pendingNote: null, confirmForgot: false,
 };
 let unsubs = [];
 
@@ -57,6 +58,144 @@ function setTabs(show) {
 }
 function stopListeners() { unsubs.forEach((u) => u()); unsubs = []; }
 
+// ---------- 나만 보기 메모 잠금 (기기에서 암호화) ----------
+// 메모 비밀번호로 만든 열쇠는 이 휴대폰 안에만 있고 서버로 보내지 않습니다.
+const te = new TextEncoder(), td = new TextDecoder();
+const b64 = (buf) => { let s = ''; new Uint8Array(buf).forEach((b) => { s += String.fromCharCode(b); }); return btoa(s); };
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function deriveKey(pw, salt) {
+  const base = await crypto.subtle.importKey('raw', te.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' }, base,
+    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function seal(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(obj)));
+  return { iv: b64(iv), ct: b64(ct) };
+}
+async function unseal(key, { iv, ct }) {
+  return JSON.parse(td.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(iv) }, key, unb64(ct))));
+}
+// 기기 저장소(IndexedDB)에 열쇠 보관 — 꺼낼 수 없는 형태라 이 기기에서만 쓸 수 있어요.
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('sgj', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('keys');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+async function idbDo(mode, fn) {
+  try {
+    const d = await idb();
+    return await new Promise((res, rej) => {
+      const tx = d.transaction('keys', mode); const req = fn(tx.objectStore('keys'));
+      tx.oncomplete = () => res(req?.result); tx.onerror = () => rej(tx.error);
+    });
+  } catch { return undefined; }
+}
+const keyGet = (uid) => idbDo('readonly', (st) => st.get(uid));
+const keyPut = (uid, k) => idbDo('readwrite', (st) => st.put(k, uid));
+const keyDel = (uid) => idbDo('readwrite', (st) => st.delete(uid));
+
+async function loadDeviceKey() {
+  S.noteKey = null;
+  const lock = S.profile?.noteLock; if (!lock) return;
+  const k = await keyGet(S.user.uid);
+  if (!k) return;
+  try { await unseal(k, lock.check); S.noteKey = k; } catch { await keyDel(S.user.uid); }
+}
+
+async function setupLock(pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(pw, salt);
+  const noteLock = { salt: b64(salt), check: await seal(key, { ok: 'segyeopjul' }) };
+  await updateDoc(doc(db, 'users', S.user.uid), { noteLock });
+  S.profile.noteLock = noteLock;
+  await afterUnlock(key);
+}
+
+async function unlock(pw) {
+  const lock = S.profile.noteLock;
+  const key = await deriveKey(pw, unb64(lock.salt));
+  try { await unseal(key, lock.check); } catch { return false; }
+  await afterUnlock(key);
+  return true;
+}
+
+async function afterUnlock(key) {
+  S.noteKey = key;
+  await keyPut(S.user.uid, key);
+  // 예전에 잠금 없이 저장된 메모가 있으면 잠가서 다시 저장
+  for (const n of S.myNotesRaw.filter((x) => x.text !== undefined && !x.ct)) {
+    const sealed = await seal(key, { text: n.text, context: n.context || '' });
+    await setDoc(doc(db, 'users', S.user.uid, 'notes', n.id), { author: S.user.uid, ...sealed, createdAt: n.createdAt || serverTimestamp() });
+  }
+  if (S.pendingNote) {
+    const pn = S.pendingNote; S.pendingNote = null;
+    const t = document.getElementById('note-text'); if (t) t.value = '';
+    await addDoc(collection(db, 'users', S.user.uid, 'notes'), { author: S.user.uid, ...(await seal(key, pn)), createdAt: serverTimestamp() });
+    toast('잠가서 저장했어요.');
+  }
+  await refreshMyNotes();
+}
+
+async function refreshMyNotes() {
+  const out = [];
+  for (const n of S.myNotesRaw) {
+    if (n.ct && S.noteKey) {
+      try { const o = await unseal(S.noteKey, n); out.push({ ...n, text: o.text, context: o.context, locked: false }); }
+      catch { out.push({ ...n, text: '', locked: true }); }
+    } else if (n.ct) out.push({ ...n, text: '', locked: true });
+    else out.push({ ...n, locked: false });
+  }
+  S.myNotes = out;
+  render();
+}
+
+async function resetLock() {
+  const batch = writeBatch(db);
+  (await getDocs(collection(db, 'users', S.user.uid, 'notes'))).forEach((d) => batch.delete(d.ref));
+  batch.update(doc(db, 'users', S.user.uid), { noteLock: null });
+  await batch.commit();
+  S.profile.noteLock = null; S.noteKey = null; await keyDel(S.user.uid);
+  toast('잠긴 메모를 지웠어요. 새 비밀번호를 정해 주세요.');
+  render();
+}
+
+function lockCard() {
+  const has = !!S.profile.noteLock;
+  const lockedCount = S.myNotes.filter((n) => n.locked).length;
+  if (has && S.noteKey) return '';
+  if (!has) return `<form id="lock-setup" class="card stack lock">
+    <h2 class="h2">메모 비밀번호 정하기</h2>
+    ${S.pendingNote ? '<p class="warn">비밀번호를 정하면 방금 쓴 메모가 잠겨서 저장돼요.</p>' : ''}
+    <p class="fine">‘나만 보기’ 메모는 이 비밀번호로 잠가서 저장해요. 배우자도, 운영자도 읽을 수 없어요. <b>잊으면 누구도 찾아 줄 수 없으니</b> 꼭 기억해 두세요.</p>
+    <label for="pw1">비밀번호 (8자 이상)</label><input id="pw1" name="pw1" type="password" minlength="8" required autocomplete="new-password">
+    <label for="pw2">한 번 더</label><input id="pw2" name="pw2" type="password" minlength="8" required autocomplete="new-password">
+    <button class="btn primary" type="submit">정하기</button></form>`;
+  return `<form id="lock-open" class="card stack lock">
+    <h2 class="h2">잠긴 메모 열기</h2>
+    ${S.pendingNote ? '<p class="warn">비밀번호를 넣으면 방금 쓴 메모가 잠겨서 저장돼요.</p>' : `<p class="fine">‘나만 보기’ 메모 ${lockedCount}개가 잠겨 있어요. 이 휴대폰에서 한 번만 넣으면 돼요.</p>`}
+    <label for="pw-open">메모 비밀번호</label><input id="pw-open" name="pw" type="password" required autocomplete="current-password">
+    <button class="btn primary" type="submit">열기</button>
+    <button type="button" class="link danger-text" data-action="forgot-lock">비밀번호를 잊었어요</button></form>`;
+}
+
+function bindLockForms() {
+  $('#lock-setup')?.addEventListener('submit', async (ev) => {
+    ev.preventDefault(); const f = ev.target;
+    if (f.pw1.value.length < 8) return toast('8자 이상으로 정해 주세요.');
+    if (f.pw1.value !== f.pw2.value) return toast('두 비밀번호가 달라요.');
+    try { f.querySelector('button').disabled = true; await setupLock(f.pw1.value); toast('메모 비밀번호를 정했어요.'); }
+    catch (e) { fail(e); }
+  });
+  $('#lock-open')?.addEventListener('submit', async (ev) => {
+    ev.preventDefault(); const f = ev.target;
+    try { f.querySelector('button').disabled = true; if (!(await unlock(f.pw.value))) { toast('비밀번호가 맞지 않아요.'); render(); } }
+    catch (e) { fail(e); }
+  });
+}
+
 // ---------- 로그인 ----------
 onAuthStateChanged(auth, async (user) => {
   stopListeners();
@@ -78,6 +217,7 @@ async function boot() {
     return renderConnect();
   }
   S.hh = hs.data();
+  await loadDeviceKey();
   await seedPromisesIfNeeded();
   listen();
   setTabs(true);
@@ -104,9 +244,21 @@ function renderLogin() {
       <h1>함께 자라가는<br>가정</h1>
       <p>남편과 아내가 각자 로그인하고,<br>하나의 약속으로 연결됩니다.</p>
       <button type="button" class="btn big light" data-action="login">Google 계정으로 시작하기</button>
-      <p class="fine">개인 메모는 내가 나누기 전까지 나만 볼 수 있어요.</p>
+      <p class="fine">배우자에게는 내가 나눈 메모만 보여요.</p>
+      ${privacyBlock()}
     </div>
   </section>`;
+}
+
+// ---------- 보안 안내 ----------
+function privacyBlock(open = false) {
+  return `<details class="card privacy" ${open ? 'open' : ''}>
+    <summary>내 기록은 누가 볼 수 있나요?</summary>
+    <div class="pv-row"><span class="pv-tag both">함께 봐요</span><p>약속 체크, 감사, 나눈 메모, 주간 대화</p></div>
+    <div class="pv-row"><span class="pv-tag cond">둘 다 마치면</span><p>월간 점검 점수</p></div>
+    <div class="pv-row"><span class="pv-tag me">나만 봐요</span><p>‘나만 보기’ 메모는 내 비밀번호로 잠가서 저장해요. 배우자도, 운영자도 읽을 수 없어요.</p></div>
+    <p class="fine pv-foot">광고를 넣지 않고, 기록을 팔지 않아요. 계정을 삭제하면 내 기록은 모두 지워져요.</p>
+  </details>`;
 }
 
 // ---------- 처음 설정 ----------
@@ -127,6 +279,7 @@ function renderOnboarding() {
       </fieldset>
       <button class="btn primary big" type="submit">시작하기</button>
     </form>
+    ${privacyBlock()}
   </section>`;
   $('#onb').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -147,6 +300,7 @@ function renderConnect(code = null) {
     <p class="lead">한 사람이 초대 코드를 만들고, 다른 사람이 그 코드를 입력하면 하나의 가정으로 묶입니다.</p>
     ${connectBlock(code)}
     <button type="button" class="btn ghost" data-action="solo-start">연결은 나중에 하고 먼저 둘러보기</button>
+    ${privacyBlock()}
   </section>`;
 }
 
@@ -287,7 +441,7 @@ function listen() {
     S.sharedNotes = qs.docs.map((d) => ({ id: d.id, shared: true, ...d.data() })); render();
   }));
   unsubs.push(onSnapshot(query(collection(db, 'users', uid, 'notes'), orderBy('createdAt', 'desc'), limit(100)), (qs) => {
-    S.myNotes = qs.docs.map((d) => ({ id: d.id, shared: false, ...d.data() })); render();
+    S.myNotesRaw = qs.docs.map((d) => ({ id: d.id, shared: false, ...d.data() })); refreshMyNotes();
   }));
   unsubs.push(onSnapshot(doc(db, 'households', hid, 'talks', mondayStr()), (s) => {
     S.talkDone = s.exists() ? s.data() : null; render();
@@ -310,6 +464,21 @@ async function seedPromisesIfNeeded() {
 // ---------- 화면 그리기 ----------
 function render() {
   if (!S.hh) return;
+  // 배우자 쪽 변화로 화면이 다시 그려져도, 쓰던 글은 지워지지 않게
+  const keep = {}; let focusId = document.activeElement?.id;
+  view.querySelectorAll('input[id], textarea[id]').forEach((el) => {
+    if (el.type === 'password') return;
+    keep[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  draw();
+  Object.entries(keep).forEach(([id, v]) => {
+    const el = document.getElementById(id); if (!el) return;
+    if (el.type === 'checkbox') el.checked = v; else if (v && !el.value) el.value = v;
+  });
+  if (focusId) document.getElementById(focusId)?.focus?.({ preventScroll: true });
+}
+
+function draw() {
   setTabs(true);
   if (S.sub?.type === 'talk') return renderTalk();
   if (S.sub?.type === 'topic') return renderTopic(S.sub.id);
@@ -595,19 +764,24 @@ function noteForm(context = '') {
   return `<form id="note-form" class="card stack" data-context="${esc(context)}">
     <label for="note-text" class="h2">메모 남기기</label>
     <textarea id="note-text" name="text" rows="3" maxlength="2000" required placeholder="떠오른 생각, 기도 제목, 경험을 적어 보세요."></textarea>
-    <label class="switch"><input type="checkbox" name="share" ${S.partner ? '' : 'disabled'}> 배우자와 나누기 <span class="fine">(끄면 나만 봐요)</span></label>
+    <label class="switch"><input type="checkbox" name="share" ${S.partner ? '' : 'disabled'}> 배우자와 나누기 <span class="fine">(끄면 잠가서 나만 봐요)</span></label>
     <button class="btn primary" type="submit">저장</button></form>`;
 }
 function bindNoteForm() {
   $('#note-form')?.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const f = ev.target; const text = f.text.value.trim(); if (!text) return;
-    const data = { author: S.user.uid, text, context: f.dataset.context || '', createdAt: serverTimestamp() };
+    const context = f.dataset.context || '';
     const shared = !!(f.share.checked && S.partner);
+    if (!shared && !S.noteKey) {
+      // 잠금이 아직 없거나 이 기기에서 열리지 않음 → 메모·설정에서 비밀번호부터
+      S.pendingNote = { text, context }; S.tab = 'me'; S.sub = null; window.scrollTo(0, 0); render();
+      return toast(S.profile.noteLock ? '메모 비밀번호를 넣어 주세요.' : '먼저 메모 비밀번호를 정해 주세요.');
+    }
     try {
-      if (shared) await addDoc(collection(db, 'households', S.hid, 'notes'), data);
-      else await addDoc(collection(db, 'users', S.user.uid, 'notes'), data);
-      f.reset(); toast(shared ? '배우자와 나눴어요.' : '나만 보는 메모로 저장했어요.');
+      if (shared) await addDoc(collection(db, 'households', S.hid, 'notes'), { author: S.user.uid, text, context, createdAt: serverTimestamp() });
+      else await addDoc(collection(db, 'users', S.user.uid, 'notes'), { author: S.user.uid, ...(await seal(S.noteKey, { text, context })), createdAt: serverTimestamp() });
+      f.reset(); toast(shared ? '배우자와 나눴어요.' : '잠가서 저장했어요.');
     } catch (e) { fail(e); }
   });
 }
@@ -618,12 +792,14 @@ function renderMe() {
   const noteCard = (n) => {
     const mine = n.author === S.user.uid;
     const who = mine ? '나' : (S.partner?.name || '배우자');
-    return `<article class="card note ${n.shared ? 'shared' : ''}"><div class="card-head"><span class="fine">${esc(who)} · ${n.shared ? '나눈 메모' : '나만 보기'}${n.context ? ` · ${esc(n.context)}` : ''} · ${when(n)}</span>
-      ${mine ? `<button type="button" class="link" data-action="delete-note" data-id="${n.id}" data-shared="${n.shared}">삭제</button>` : ''}</div><p>${esc(n.text)}</p></article>`;
+    return `<article class="card note ${n.shared ? 'shared' : ''}"><div class="card-head"><span class="fine">${esc(who)} · ${n.shared ? '나눈 메모' : '🔒 나만 보기'}${n.context ? ` · ${esc(n.context)}` : ''} · ${when(n)}</span>
+      ${mine ? `<button type="button" class="link" data-action="delete-note" data-id="${n.id}" data-shared="${n.shared}">삭제</button>` : ''}</div>${n.locked ? '<p class="fine">잠겨 있어요</p>' : `<p>${esc(n.text)}</p>`}</article>`;
   };
   view.innerHTML = `
   <section class="page">
     ${header('메모·설정', '나의 공간')}
+    ${lockCard()}
+    ${S.confirmForgot ? `<div class="card warm stack"><strong>잠긴 메모를 모두 지우고 새로 시작할까요?</strong><p class="fine">비밀번호 없이는 누구도 열 수 없어서, 잠긴 메모는 지울 수밖에 없어요. 나눈 메모는 그대로 남아요.</p><div class="btns"><button type="button" class="btn danger small" data-action="forgot-yes">지우고 새로 시작</button><button type="button" class="btn small" data-action="forgot-no">취소</button></div></div>` : ''}
     ${noteForm('')}
     <h2 class="h2">메모</h2>
     ${notes.length ? notes.map(noteCard).join('') : '<p class="fine">아직 메모가 없어요.</p>'}
@@ -636,12 +812,16 @@ function renderMe() {
       : `${connectBlock(S.inviteCode || null)}`}
     </div>
 
+    <h2 class="h2">개인정보와 보안</h2>
+    ${privacyBlock(true)}
+
     <h2 class="h2">설정</h2>
     <form id="profile-form" class="card stack">
       <label for="pf-name">이름</label><input id="pf-name" name="name" value="${esc(S.profile.name)}" maxlength="20" required>
       <p class="fine">역할: ${esc(roleName(S.profile.role))} · ${esc(S.user.email || '')}</p>
       <button class="btn small" type="submit">이름 저장</button>
     </form>
+    ${S.noteKey ? '<div class="card stack"><p class="fine">‘나만 보기’ 메모가 이 휴대폰에서 열려 있어요. 다른 사람과 함께 쓰는 기기라면 잠가 두세요.</p><button type="button" class="btn small" data-action="lock-device">이 휴대폰에서 메모 잠그기</button></div>' : ''}
     <div class="card"><h2 class="h2">도움이 필요할 때</h2>${HELP_LINES.map((h) => `<div class="help"><strong>${esc(h.num)}</strong><span>${esc(h.name)} · ${esc(h.when)}</span></div>`).join('')}</div>
     <div class="btns"><button type="button" class="btn" data-action="logout">로그아웃</button>
       ${S.confirmDelete ? `<button type="button" class="btn danger" data-action="delete-account-yes">정말 삭제하기</button><button type="button" class="btn" data-action="delete-account-no">취소</button>`
@@ -649,6 +829,8 @@ function renderMe() {
     ${S.confirmDelete ? '<p class="fine">내 약속, 메모, 감사, 점검 기록과 계정이 지워지고 연결도 해제돼요. 되돌릴 수 없어요.</p>' : ''}
   </section>`;
   bindNoteForm();
+  bindLockForms();
+  if (S.pendingNote && $('#note-text') && !$('#note-text').value) $('#note-text').value = S.pendingNote.text;
   $('#profile-form')?.addEventListener('submit', async (ev) => {
     ev.preventDefault(); const name = ev.target.name.value.trim(); if (!name) return;
     try {
@@ -669,10 +851,16 @@ async function deleteAccount() {
       (await getDocs(query(col('notes'), where('author', '==', uid)))).forEach((d) => batch.delete(d.ref));
       (await getDocs(query(col('thanks'), where('from', '==', uid)))).forEach((d) => batch.delete(d.ref));
       (await getDocs(query(col('days'), where('uid', '==', uid)))).forEach((d) => batch.delete(d.ref));
+      // 월간 점검: 2026년 10월(앱 시작)부터 이번 달까지
+      for (let d = new Date(2026, 9, 1); d <= new Date(); d.setMonth(d.getMonth() + 1)) {
+        const per = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+        batch.delete(doc(db, 'households', S.hid, 'assessments', per, 'answers', uid));
+      }
     }
     await batch.commit();
     if (S.hid) await leaveHousehold();
     await deleteDoc(doc(db, 'users', uid));
+    await keyDel(uid);
     try { await deleteUser(auth.currentUser); }
     catch (e) {
       if (e.code === 'auth/requires-recent-login') { await reauthenticateWithPopup(auth.currentUser, new GoogleAuthProvider()); await deleteUser(auth.currentUser); }
@@ -780,7 +968,11 @@ document.addEventListener('click', async (ev) => {
     case 'talk-next': { const nf = $('#next-focus'); if (nf) S.talkNext = nf.value.trim(); S.talkStep += 1; return render(); }
     case 'talk-finish': return finishTalk();
     case 'leave': return leaveHousehold();
-    case 'logout': stopListeners(); return signOut(auth);
+    case 'logout': stopListeners(); await keyDel(S.user.uid); S.noteKey = null; return signOut(auth);
+    case 'lock-device': await keyDel(S.user.uid); S.noteKey = null; return refreshMyNotes();
+    case 'forgot-lock': S.confirmForgot = true; return render();
+    case 'forgot-no': S.confirmForgot = false; return render();
+    case 'forgot-yes': S.confirmForgot = false; try { await resetLock(); } catch (e) { fail(e); } return;
     case 'delete-account': S.confirmDelete = true; return render();
     case 'delete-account-no': S.confirmDelete = false; return render();
     case 'delete-account-yes': return deleteAccount();
