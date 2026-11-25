@@ -1,6 +1,6 @@
 // 세 겹 줄 — 화면 파일만 저장해 두는 서비스 워커 (데이터는 Firebase가 따로 관리)
 // 파일을 고쳐 다시 올릴 때는 아래 버전 숫자를 하나 올려 주세요.
-const VERSION = 'sgj-v4';
+const VERSION = 'sgj-v5';
 const FILES = [
   './', './index.html', './css/app.css', './js/app.js', './js/content.js', './js/firebase-config.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/beams.svg',

@@ -12,7 +12,7 @@ import { firebaseConfig } from './firebase-config.js';
 import {
   DEFAULT_PROMISES, STAGES, TALK_STEPS, FOUNDATIONS,
   CATEGORIES, TOPICS, DAILY_REFS, HELP_LINES,
-  SCALES, STRANDS, BIG_QUESTIONS, AREAS, DETAIL_QUESTIONS
+  SCALES, STRANDS, BIG_QUESTIONS, AREAS, DETAIL_QUESTIONS, WEEKLY_SHARE
 } from './content.js';
 
 const fbApp = initializeApp(firebaseConfig);
@@ -671,6 +671,7 @@ async function loadCheck() {
   S.check.na = { ...(S.check.mine?.na || {}) };
   S.check.hide = !!S.check.mine?.hide;
   S.check.stage = S.check.mine?.stage || 1;
+  S.check.loss = S.check.mine?.loss || '';
   S.check.partner = null;
   if (S.partner && S.check.mine?.completed) {
     const ps = await getDoc(doc(db, ...base, S.partner.uid)).catch(() => null);
@@ -700,6 +701,9 @@ function renderCheck() {
       <div class="steps"><span class="on"></span><span></span></div>
       <p class="lead">1단계 · 큰 틀 4문항. 기초와 세 줄을 한 문항씩 봐요. 각자 따로 답하고, 둘 다 마치면 함께 열려요.</p>
       <div class="card">${BIG_QUESTIONS.map((q) => `<div class="qrow"><p><span class="fine">${esc(strandName(q.strand))}</span> ${esc(q.q)}</p>${optionRow(q.id, { scale: 'agree', q: q.q }, false)}</div>`).join('')}</div>
+      <div class="card stack"><label for="loss-text" class="h2">나눔 · ${esc(WEEKLY_SHARE.q)}</label>
+        <textarea id="loss-text" rows="3" maxlength="500" placeholder="${esc(WEEKLY_SHARE.placeholder)}">${esc(S.check.loss)}</textarea>
+        <p class="fine">점수는 없어요. 둘 다 마치면 서로의 나눔이 보이고, 주간 대화에서 함께 이야기해요.</p></div>
       <div class="btns sticky"><span class="fine">${BIG_QUESTIONS.filter((q) => S.check.draft[q.id] !== undefined).length}/4</span>
         <button type="button" class="btn primary" data-action="check-next" ${bigDone ? '' : 'disabled'}>${n <= 4 ? '2단계로' : '마치기'}</button></div>
     </section>`;
@@ -723,7 +727,7 @@ function renderCheck() {
     ${ids.map((aid) => { const a = areaById(aid); return `<div class="card">
       <div class="card-head"><h2 class="h2">${esc(a.name)}</h2><span class="fine">${esc(strandName(a.strand))}</span></div>
       ${a.optional ? `<label class="switch"><input type="checkbox" data-action="toggle-na" data-id="${aid}" ${S.check.na[aid] ? 'checked' : ''}> 우리 가정은 해당 없음</label>` : ''}
-      ${S.check.na[aid] ? '' : DETAIL_QUESTIONS[aid].map((q) => `<div class="qrow"><p><span class="fine">${{ m: '마음', d: '행동', u: '우리' }[q.id]}</span> ${esc(qText(q))}</p>${optionRow(qKey(aid, q.id), q, false)}</div>`).join('')}
+      ${S.check.na[aid] ? '' : DETAIL_QUESTIONS[aid].map((q) => `<div class="qrow"><p><span class="fine">${q.label || { m: '마음', d: '행동', u: '우리' }[q.id]}</span> ${esc(qText(q))}</p>${optionRow(qKey(aid, q.id), q, false)}</div>`).join('')}
     </div>`; }).join('')}
     ${hasSensitive ? `<label class="card switch"><input type="checkbox" data-action="toggle-hide" ${S.check.hide ? 'checked' : ''}> 성·정절 결과는 이번 주엔 화면 대신 대화로 먼저 나눌게요</label>` : ''}
     <div class="btns sticky"><span class="fine">${answered}/${need.length}</span>
@@ -766,7 +770,7 @@ function renderCheckResult(head) {
       ${hidden ? '<p class="fine">이번 주는 화면 대신 대화로 먼저 나누기로 했어요. 주간 대화 때 서로 물어보세요.</p>'
         : naMe || naPt ? '<p class="fine">해당 없음으로 답했어요.</p>'
         : `<div class="tbl"><table><thead><tr><th></th><th>나</th><th>${esc(S.partner.name)}</th></tr></thead><tbody>${DETAIL_QUESTIONS[aid].map((q) =>
-          `<tr><td>${{ m: '마음', d: '행동', u: '우리' }[q.id]} · ${esc(qText(q))}</td><td class="num">${label(q, a[qKey(aid, q.id)])}</td><td class="num">${label(q, b[qKey(aid, q.id)])}</td></tr>`).join('')}</tbody></table></div>`}
+          `<tr><td>${q.label || { m: '마음', d: '행동', u: '우리' }[q.id]} · ${esc(qText(q))}</td><td class="num">${label(q, a[qKey(aid, q.id)])}</td><td class="num">${label(q, b[qKey(aid, q.id)])}</td></tr>`).join('')}</tbody></table></div>`}
       ${talk && !hidden ? `<p class="fine">‘${esc(uq.q)}’에서 서로 다르게 느꼈어요. 해결보다 먼저 "당신은 왜 그렇게 느꼈어?"를 물어보세요.</p>` : ''}
       <p class="fine">말씀 ${esc(ar.refs)} · 실천: ${esc(ar.practice)}</p>
       <div class="btns">${focusId === aid ? '<span class="tag good">이번 주 집중 영역</span>' : `<button type="button" class="btn small ${low ? 'primary' : ''}" data-action="set-area-focus" data-id="${aid}">이번 주 집중 영역으로</button>`}
@@ -775,6 +779,10 @@ function renderCheckResult(head) {
   }).join('');
   view.innerHTML = `<section class="page">${head}
     <p class="lead">점수는 성적표가 아니라 대화의 출발점이에요. 다르게 본 곳부터 이야기해 보세요.</p>
+    ${me.loss || pt.loss ? `<div class="card warm"><h2 class="h2">이번 주 손해 본 것</h2>
+      <p><span class="who me">나</span><br>${me.loss ? esc(me.loss) : '<span class="fine">적지 않았어요</span>'}</p>
+      <p><span class="who partner">${esc(S.partner.name)}</span><br>${pt.loss ? esc(pt.loss) : '<span class="fine">적지 않았어요</span>'}</p>
+      <p class="fine">서로의 내려놓음에 고맙다고 말해 주세요.</p></div>` : ''}
     <div class="card"><h2 class="h2">큰 틀</h2><div class="tbl"><table><thead><tr><th>줄</th><th>나</th><th>${esc(S.partner.name)}</th><th></th></tr></thead><tbody>${bigRows}</tbody></table></div></div>
     ${cards || '<p class="fine">이번 주는 돌아보는 주라 세부 점검이 없어요.</p>'}
   </section>`;
@@ -789,7 +797,7 @@ function myOnlySummary(me) {
 async function saveCheck(complete) {
   try {
     await setDoc(doc(db, 'households', S.hid, 'assessments', weekKey(), 'answers', S.user.uid), {
-      uid: S.user.uid, scores: S.check.draft, extra: S.check.extra, na: S.check.na, hide: S.check.hide,
+      uid: S.user.uid, scores: S.check.draft, loss: ($('#loss-text')?.value ?? S.check.loss ?? '').trim(), extra: S.check.extra, na: S.check.na, hide: S.check.hide,
       stage: S.check.stage, week: weekOfMonth(), completed: !!complete, updatedAt: serverTimestamp(),
     });
     toast(complete ? '이번 주 점검을 마쳤어요.' : '저장했어요.');
@@ -1033,6 +1041,7 @@ document.addEventListener('click', async (ev) => {
       return;
     case 'score': S.check.draft[el.dataset.q] = Number(el.dataset.v); return render();
     case 'check-next':
+      S.check.loss = ($('#loss-text')?.value ?? S.check.loss).trim();
       if (weekOfMonth() > 4) return saveCheck(true);
       S.check.stage = 2; window.scrollTo(0, 0); return render();
     case 'check-back': S.check.stage = 1; window.scrollTo(0, 0); return render();

@@ -271,6 +271,7 @@ export const SCALES = {
   conflict: [{ t: '갈등 없었음', s: null }, { t: '그날 화해', s: 5 }, { t: '하루 이상', s: 3 }, { t: '아직 못 풂', s: 1 }],
   share: [{ t: '힘든 일 없었음', s: null }, { t: '다 나눔', s: 5 }, { t: '일부만', s: 3 }, { t: '못 나눔', s: 1 }],
   decide: [{ t: '큰 결정 없었음', s: null }, { t: '충분히 의논', s: 5 }, { t: '혼자 정함', s: 1 }],
+  hobby: [{ t: '잘 누렸음', s: null }, { t: '내 선택·관리 때문', s: 5 }, { t: '상황이 어려웠음', s: 3 }, { t: '배우자 때문이라고 느낌', s: 1 }],
   sexCount: [{ t: '0회', s: null }, { t: '1회', s: null }, { t: '2회', s: null }, { t: '3회 이상', s: null }],
 };
 
@@ -280,6 +281,9 @@ export const STRANDS = [
   { id: 'couple', name: '남편과 아내', sub: '둘째 줄' },
   { id: 'family', name: '우리와 다음 세대', sub: '셋째 줄' },
 ];
+
+// 매주 1단계 끝에 쓰는 나눔 (점수 없음, 둘 다 마치면 서로 보임)
+export const WEEKLY_SHARE = { id: 'loss', q: '이번 한 주 배우자와 가정을 위해 내가 손해 본 것(기꺼이 내려놓은 것)은 무엇인가요?', placeholder: '예: 드럼 연습 대신 아이들 재우기를 맡았어요' };
 
 export const BIG_QUESTIONS = [
   { id: 'K1', strand: 'base', q: '이번 주 나는 우리 결혼이 하나님 앞에서 맺은 언약이라는 사실 위에 서 있었다' },
@@ -296,6 +300,7 @@ export const AREAS = [
   { id: 'a04', strand: 'god', week: 1, name: '몸과 생활 돌봄', refs: '고전 6:19-20 · 막 6:31', practice: '정해진 취침 시간, 주 3회 유산소', topics: ['1-2'] },
   { id: 'a05', strand: 'god', week: 1, name: '성품과 감정', refs: '갈 5:22-23 · 약 1:19-20', practice: '감정에 이름 붙이기, 20분 쉬고 다시 말하기', topics: ['2-2'] },
   { id: 'a06', strand: 'god', week: 1, name: '일과 소명', refs: '창 2:15 · 골 3:23 · 전 2:24', practice: '퇴근 후 일 연락을 보지 않는 시간 정하기', topics: ['1-3'] },
+  { id: 'a21', strand: 'god', week: 1, name: '겸손과 책임', refs: '빌 2:3-4 · 마 7:1-5 · 약 4:11-12 · 갈 6:5', practice: '배우자를 바꾸려 하기 전에 먼저 묻기, 남 탓 대신 "내 몫은 무엇이었지?" 묻기', topics: ['2-2'] },
   { id: 'a07', strand: 'couple', week: 2, name: '우정과 즐거움', refs: '빌 2:4 · 아 2:16 · 전 9:9', practice: '주 1회 둘만의 시간, 질문 하나 나누기', topics: ['2-1', '2-4'] },
   { id: 'a08', strand: 'couple', week: 2, name: '감사·인정·존중', refs: '엡 5:33 · 잠 31:28-29 · 살전 5:18', practice: '매일 감사 한 줄', topics: ['2-2'] },
   { id: 'a09', strand: 'couple', week: 2, name: '대화와 경청', refs: '엡 4:29 · 약 1:19', practice: '주간 대화 30분, 휴대폰 내려놓기', topics: ['2-1'] },
@@ -343,6 +348,11 @@ export const DETAIL_QUESTIONS = {
     { id: 'm', q: '내 일을 하나님이 주신 소명으로 여기며 성실하게 하고 있다', scale: 'agree' },
     { id: 'd', q: '퇴근 후나 쉬는 날, 일 때문에 가족과 보내기로 한 시간을 빼앗긴 날', scale: 'freqRev' },
     { id: 'u', q: '우리 부부는 일과 가정의 균형에 대해 같은 생각을 하고 있다', scale: 'agree' },
+  ],
+  a21: [
+    { id: 'm', q: '나는 하나님보다 높아져서 배우자나 다른 사람을 판단하고 심판하려 하지 않았다', scale: 'agree' },
+    { id: 'd', q: '배우자나 다른 사람을 내 뜻대로 통제하려고 한 날', scale: 'freqRev' },
+    { id: 'u', label: '돌아봄', q: '이번 주 내 취미·특기 생활을 하지 못했다면, 그것은 배우자 때문인가 나 때문인가', scale: 'hobby' },
   ],
   a07: [
     { id: 'm', q: '배우자와 함께 있는 시간이 즐겁고 편하다', scale: 'agree' },
