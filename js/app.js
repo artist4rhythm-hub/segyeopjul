@@ -10,8 +10,9 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 import {
-  DEFAULT_PROMISES, STAGES, CHECK_A, CHECK_B, SCORE_LABELS, TALK_STEPS, FOUNDATIONS,
-  CATEGORIES, TOPICS, DAILY_REFS, HELP_LINES
+  DEFAULT_PROMISES, STAGES, TALK_STEPS, FOUNDATIONS,
+  CATEGORIES, TOPICS, DAILY_REFS, HELP_LINES,
+  SCALES, STRANDS, BIG_QUESTIONS, AREAS, DETAIL_QUESTIONS
 } from './content.js';
 
 const fbApp = initializeApp(firebaseConfig);
@@ -517,7 +518,8 @@ function renderHome() {
   const lastThanks = S.thanks.find((t) => t.to === uid);
   const dts = daysToSunday();
   const ref = DAILY_REFS[(d.getDate() + d.getMonth()) % DAILY_REFS.length];
-  const focus = S.hh.focus?.period === periodKey() ? TOPICS.find((t) => t.id === S.hh.focus.topicId) : null;
+  const focusArea = S.hh.focus?.areaId && S.hh.focus?.period === `W${mondayStr()}` ? AREAS.find((a) => a.id === S.hh.focus.areaId) : null;
+  const focus = !focusArea && S.hh.focus?.period === periodKey() ? TOPICS.find((t) => t.id === S.hh.focus.topicId) : null;
 
   view.innerHTML = `
   <section class="page">
@@ -545,9 +547,10 @@ function renderHome() {
         <strong class="big-num">${S.talkDone ? '완료' : dts === 0 ? '오늘' : `D-${dts}`}</strong>
         <span class="fine">${S.talkDone ? '이번 주 대화를 마쳤어요' : '일요일 · 눌러서 시작'}</span>
       </button>
-      <button type="button" class="card tile" data-action="go" data-tab="${focus ? 'guide' : 'check'}">
-        <span class="fine">이번 달 주제</span>
-        <strong>${focus ? `${esc(focus.id)} ${esc(focus.title)}` : '점검 후 정하기'}</strong>
+      <button type="button" class="card tile" data-action="go" data-tab="check">
+        <span class="fine">이번 주 집중 영역</span>
+        <strong>${focusArea ? esc(focusArea.name) : focus ? `${esc(focus.id)} ${esc(focus.title)}` : '점검 후 정하기'}</strong>
+        ${focusArea ? `<span class="fine">${esc(focusArea.practice)}</span>` : '<span class="fine">눌러서 이번 주 점검</span>'}
       </button>
     </div>
     <div class="card">
@@ -644,72 +647,152 @@ function renderPromises() {
 }
 
 // ---------- 점검 ----------
-const ALL_Q = [...CHECK_A, ...CHECK_B];
+// 매주 두 단계 점검: 1단계 큰 틀(4문항) → 2단계 세부(이번 주 차례의 영역 × 3문항)
+const weekKey = () => `W${mondayStr()}`;
+const weekOfMonth = () => Math.ceil(Number(mondayStr().slice(8)) / 7);   // 1~5, 5 = 돌아보는 주
+const areaById = (id) => AREAS.find((a) => a.id === id);
+const strandName = (id) => STRANDS.find((x) => x.id === id)?.name || '';
+const qKey = (aid, qid) => `${aid}_${qid}`;
+const scaleOf = (q) => SCALES[q.scale];
+const qText = (q) => (q.qWife && S.profile.role === 'wife' ? q.qWife : q.q);
+const scoreOf = (q, idx) => (idx === undefined || idx === null ? null : scaleOf(q)[idx]?.s ?? null);
+function weekAreas(ans) {
+  const n = weekOfMonth();
+  const base = n >= 1 && n <= 4 ? AREAS.filter((a) => a.week === n).map((a) => a.id) : [];
+  return [...new Set([...base, ...((ans && ans.extra) || [])])];
+}
+
 async function loadCheck() {
-  const p = periodKey(); const base = ['households', S.hid, 'assessments', p, 'answers'];
+  const wk = weekKey(); const base = ['households', S.hid, 'assessments', wk, 'answers'];
   const mine = await getDoc(doc(db, ...base, S.user.uid)).catch(() => null);
   S.check.mine = mine?.exists() ? mine.data() : null;
   S.check.draft = { ...(S.check.mine?.scores || {}) };
+  S.check.extra = [...(S.check.mine?.extra || [])];
+  S.check.na = { ...(S.check.mine?.na || {}) };
+  S.check.hide = !!S.check.mine?.hide;
+  S.check.stage = S.check.mine?.stage || 1;
   S.check.partner = null;
   if (S.partner && S.check.mine?.completed) {
     const ps = await getDoc(doc(db, ...base, S.partner.uid)).catch(() => null);
     S.check.partner = ps?.exists() ? ps.data() : null;
   }
-  S.check.loaded = p;
+  S.check.loaded = wk;
   render();
 }
 
+function optionRow(key, q, disabled) {
+  const v = S.check.draft[key];
+  const opts = scaleOf(q);
+  return `<div class="scores n${opts.length}" role="radiogroup" aria-label="${esc(qText(q))}">${opts.map((o, i) =>
+    `<button type="button" role="radio" aria-checked="${v === i}" class="sc ${v === i ? 'on' : ''}" data-action="score" data-q="${key}" data-v="${i}" ${disabled ? 'disabled' : ''}>${q.scale === 'agree' ? `${i + 1}<small>${esc(o.t)}</small>` : esc(o.t)}</button>`).join('')}</div>`;
+}
+
 function renderCheck() {
-  if (S.check.loaded !== periodKey()) { view.innerHTML = '<section class="page"><p class="fine">불러오는 중…</p></section>'; loadCheck(); return; }
+  if (S.check.loaded !== weekKey()) { view.innerHTML = '<section class="page"><p class="fine">불러오는 중…</p></section>'; loadCheck(); return; }
   const done = !!S.check.mine?.completed;
-  const p = periodKey();
-  const qBlock = (q) => {
-    const v = S.check.draft[q.id];
-    return `<div class="qrow"><p><span class="fine">${esc(q.area)}</span> ${esc(q.q)}</p>
-      <div class="scores" role="radiogroup" aria-label="${esc(q.q)}">${SCORE_LABELS.map((l, i) =>
-        `<button type="button" role="radio" aria-checked="${v === i + 1}" class="sc ${v === i + 1 ? 'on' : ''}" data-action="score" data-q="${q.id}" data-v="${i + 1}" ${done ? 'disabled' : ''}>${i + 1}<small>${l}</small></button>`).join('')}</div></div>`;
-  };
-  let result = '';
-  if (done && S.check.partner?.completed) {
-    const a = S.check.mine.scores, b = S.check.partner.scores;
-    const recs = new Set();
-    const rows = ALL_Q.map((q) => {
-      const x = a[q.id], y = b[q.id];
-      let tag = '';
-      if (Math.abs(x - y) >= 2) tag = '<span class="tag diff">서로 다르게 봄</span>';
-      else if (x <= 2 && y <= 2) { tag = '<span class="tag low">함께 아픈 곳</span>'; (q.topics || []).forEach((t) => recs.add(t)); }
-      else if (x >= 4 && y >= 4) tag = '<span class="tag good">우리의 힘</span>';
-      return `<tr><td>${esc(q.q)}</td><td class="num">${x}</td><td class="num">${y}</td><td>${tag}</td></tr>`;
-    }).join('');
-    result = `<div class="card"><h2 class="h2">함께 보는 결과</h2>
-      <div class="tbl"><table><thead><tr><th>문항</th><th>나</th><th>${esc(S.partner.name)}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="fine">2점 이상 다른 문항은 해결보다 먼저 "당신은 왜 그렇게 느꼈어?"를 물어보세요.</p>
-      ${recs.size ? `<h3 class="h3">이번 달 추천 주제</h3>${[...recs].map((id) => { const t = TOPICS.find((x) => x.id === id); return t ? `<button type="button" class="btn small" data-action="open-topic" data-id="${t.id}">${esc(t.id)} ${esc(t.title)}</button>` : ''; }).join(' ')}` : ''}
-    </div>`;
-  } else if (done) {
-    result = `<div class="card warm"><strong>결과는 둘 다 마치면 열려요.</strong><p class="fine">${S.partner ? `${esc(S.partner.name)}님이 아직 마치지 않았어요.` : '배우자와 연결하면 함께 볼 수 있어요.'}</p><button type="button" class="btn small" data-action="reload-check">다시 확인</button></div>`;
+  const n = weekOfMonth();
+  const head = header(`${mondayStr().slice(5).replace('-', '월 ')}일 주 · ${n <= 4 ? `${n}주차` : '돌아보는 주'}`, '이번 주 점검');
+  if (done) return renderCheckResult(head);
+
+  const bigDone = BIG_QUESTIONS.every((q) => S.check.draft[q.id] !== undefined);
+  if (S.check.stage === 1) {
+    view.innerHTML = `<section class="page">${head}
+      <div class="steps"><span class="on"></span><span></span></div>
+      <p class="lead">1단계 · 큰 틀 4문항. 기초와 세 줄을 한 문항씩 봐요. 각자 따로 답하고, 둘 다 마치면 함께 열려요.</p>
+      <div class="card">${BIG_QUESTIONS.map((q) => `<div class="qrow"><p><span class="fine">${esc(strandName(q.strand))}</span> ${esc(q.q)}</p>${optionRow(q.id, { scale: 'agree', q: q.q }, false)}</div>`).join('')}</div>
+      <div class="btns sticky"><span class="fine">${BIG_QUESTIONS.filter((q) => S.check.draft[q.id] !== undefined).length}/4</span>
+        <button type="button" class="btn primary" data-action="check-next" ${bigDone ? '' : 'disabled'}>${n <= 4 ? '2단계로' : '마치기'}</button></div>
+    </section>`;
+    return;
   }
-  const answered = ALL_Q.filter((q) => S.check.draft[q.id]).length;
-  view.innerHTML = `
-  <section class="page">
-    ${header(`${p.slice(0, 4)}년 ${Number(p.slice(5))}월 점검`, '함께 점검')}
-    <p class="lead">각자 따로 고르고, 둘 다 마치면 결과가 함께 열려요. 점수는 성적표가 아니라 대화의 출발점입니다.</p>
-    ${result}
-    <div class="card"><h2 class="h2">A. 나의 상태</h2>${CHECK_A.map(qBlock).join('')}</div>
-    <div class="card"><h2 class="h2">B. 우리 부부의 상태</h2>${CHECK_B.map(qBlock).join('')}</div>
-    ${done ? '<p class="fine center">이번 달 점검을 마쳤어요. 다음 달에 다시 해 보세요.</p>' : `
-    <div class="btns sticky"><span class="fine">${answered}/${ALL_Q.length}</span>
+
+  // 2단계: 큰 틀에서 2점 이하(인덱스 0~1)인 줄은 영역 하나를 더 볼 수 있어요
+  const ids = weekAreas({ extra: S.check.extra });
+  const lowStrands = BIG_QUESTIONS.filter((q) => S.check.draft[q.id] !== undefined && S.check.draft[q.id] <= 1).map((q) => q.strand);
+  const addedStrands = S.check.extra.map((x) => areaById(x)?.strand);
+  const addable = AREAS.filter((a) => lowStrands.includes(a.strand) && !addedStrands.includes(a.strand) && !ids.includes(a.id));
+  const qs = ids.flatMap((aid) => DETAIL_QUESTIONS[aid].map((q) => ({ aid, q, key: qKey(aid, q.id) })));
+  const need = qs.filter(({ aid }) => !S.check.na[aid]);
+  const answered = need.filter(({ key }) => S.check.draft[key] !== undefined).length;
+  const hasSensitive = ids.some((aid) => areaById(aid)?.sensitive);
+  view.innerHTML = `<section class="page">${head}
+    <div class="steps"><span class="past"></span><span class="on"></span></div>
+    <p class="lead">2단계 · 세부 점검. 영역마다 마음 · 행동(지난 7일) · 우리, 세 문항이에요.</p>
+    ${addable.length ? `<div class="card warm stack"><strong>큰 틀에서 낮게 나온 줄이 있어요</strong><p class="fine">이번 주에 한 영역을 더 살펴볼 수 있어요.</p>
+      <div class="chips">${addable.map((a) => `<button type="button" class="btn small" data-action="add-area" data-id="${a.id}">+ ${esc(a.name)}</button>`).join('')}</div></div>` : ''}
+    ${ids.map((aid) => { const a = areaById(aid); return `<div class="card">
+      <div class="card-head"><h2 class="h2">${esc(a.name)}</h2><span class="fine">${esc(strandName(a.strand))}</span></div>
+      ${a.optional ? `<label class="switch"><input type="checkbox" data-action="toggle-na" data-id="${aid}" ${S.check.na[aid] ? 'checked' : ''}> 우리 가정은 해당 없음</label>` : ''}
+      ${S.check.na[aid] ? '' : DETAIL_QUESTIONS[aid].map((q) => `<div class="qrow"><p><span class="fine">${{ m: '마음', d: '행동', u: '우리' }[q.id]}</span> ${esc(qText(q))}</p>${optionRow(qKey(aid, q.id), q, false)}</div>`).join('')}
+    </div>`; }).join('')}
+    ${hasSensitive ? `<label class="card switch"><input type="checkbox" data-action="toggle-hide" ${S.check.hide ? 'checked' : ''}> 성·정절 결과는 이번 주엔 화면 대신 대화로 먼저 나눌게요</label>` : ''}
+    <div class="btns sticky"><span class="fine">${answered}/${need.length}</span>
+      <button type="button" class="btn" data-action="check-back">1단계</button>
       <button type="button" class="btn" data-action="save-check">임시 저장</button>
-      <button type="button" class="btn primary" data-action="submit-check" ${answered < ALL_Q.length ? 'disabled' : ''}>마치기</button></div>`}
+      <button type="button" class="btn primary" data-action="submit-check" ${answered < need.length ? 'disabled' : ''}>마치기</button></div>
   </section>`;
+}
+
+function renderCheckResult(head) {
+  const me = S.check.mine, pt = S.check.partner;
+  if (!pt?.completed) {
+    view.innerHTML = `<section class="page">${head}<div class="card warm"><strong>이번 주 점검을 마쳤어요.</strong>
+      <p class="fine">${S.partner ? `${esc(S.partner.name)}님이 마치면 결과가 함께 열려요.` : '배우자와 연결하면 함께 볼 수 있어요.'}</p>
+      <button type="button" class="btn small" data-action="reload-check">다시 확인</button></div>
+      ${myOnlySummary(me)}</section>`;
+    return;
+  }
+  const a = me.scores || {}, b = pt.scores || {};
+  const label = (q, idx) => (idx === undefined ? '—' : esc(scaleOf(q)[idx]?.t ?? '—'));
+  const bigRows = BIG_QUESTIONS.map((q) => {
+    const x = a[q.id], y = b[q.id];
+    const tag = x !== undefined && y !== undefined ? (Math.abs(x - y) >= 2 ? '<span class="tag diff">서로 다르게 봄</span>' : x <= 1 && y <= 1 ? '<span class="tag low">함께 아픈 곳</span>' : x >= 3 && y >= 3 ? '<span class="tag good">우리의 힘</span>' : '') : '';
+    return `<tr><td>${esc(strandName(q.strand))}</td><td class="num">${x === undefined ? '—' : x + 1}</td><td class="num">${y === undefined ? '—' : y + 1}</td><td>${tag}</td></tr>`;
+  }).join('');
+  const ids = [...new Set([...weekAreas(me), ...weekAreas(pt)])];
+  const areaAvg = (sc, aid) => { const v = DETAIL_QUESTIONS[aid].map((q) => scoreOf(q, sc[qKey(aid, q.id)])).filter((x) => x !== null); return v.length ? v.reduce((p, c) => p + c, 0) / v.length : null; };
+  const focusId = S.hh.focus?.period === weekKey() ? S.hh.focus.areaId : null;
+  const cards = ids.map((aid) => {
+    const ar = areaById(aid);
+    const hidden = ar.sensitive && (me.hide || pt.hide);
+    const naMe = me.na?.[aid], naPt = pt.na?.[aid];
+    const am = areaAvg(a, aid), bm = areaAvg(b, aid);
+    const low = am !== null && bm !== null && am <= 2.5 && bm <= 2.5;
+    const uq = DETAIL_QUESTIONS[aid].find((q) => q.id === 'u');
+    const ux = a[qKey(aid, 'u')], uy = b[qKey(aid, 'u')];
+    const talk = ux !== undefined && uy !== undefined && Math.abs(ux - uy) >= 2;
+    return `<div class="card">
+      <div class="card-head"><h2 class="h2">${esc(ar.name)}</h2>${low ? '<span class="tag low">집중 후보</span>' : talk ? '<span class="tag diff">대화 첫 질문</span>' : ''}</div>
+      ${hidden ? '<p class="fine">이번 주는 화면 대신 대화로 먼저 나누기로 했어요. 주간 대화 때 서로 물어보세요.</p>'
+        : naMe || naPt ? '<p class="fine">해당 없음으로 답했어요.</p>'
+        : `<div class="tbl"><table><thead><tr><th></th><th>나</th><th>${esc(S.partner.name)}</th></tr></thead><tbody>${DETAIL_QUESTIONS[aid].map((q) =>
+          `<tr><td>${{ m: '마음', d: '행동', u: '우리' }[q.id]} · ${esc(qText(q))}</td><td class="num">${label(q, a[qKey(aid, q.id)])}</td><td class="num">${label(q, b[qKey(aid, q.id)])}</td></tr>`).join('')}</tbody></table></div>`}
+      ${talk && !hidden ? `<p class="fine">‘${esc(uq.q)}’에서 서로 다르게 느꼈어요. 해결보다 먼저 "당신은 왜 그렇게 느꼈어?"를 물어보세요.</p>` : ''}
+      <p class="fine">말씀 ${esc(ar.refs)} · 실천: ${esc(ar.practice)}</p>
+      <div class="btns">${focusId === aid ? '<span class="tag good">이번 주 집중 영역</span>' : `<button type="button" class="btn small ${low ? 'primary' : ''}" data-action="set-area-focus" data-id="${aid}">이번 주 집중 영역으로</button>`}
+        ${ar.topics.map((t) => { const tp = TOPICS.find((x) => x.id === t); return tp ? `<button type="button" class="btn small" data-action="open-topic" data-id="${tp.id}">${esc(tp.title)}</button>` : ''; }).join('')}</div>
+    </div>`;
+  }).join('');
+  view.innerHTML = `<section class="page">${head}
+    <p class="lead">점수는 성적표가 아니라 대화의 출발점이에요. 다르게 본 곳부터 이야기해 보세요.</p>
+    <div class="card"><h2 class="h2">큰 틀</h2><div class="tbl"><table><thead><tr><th>줄</th><th>나</th><th>${esc(S.partner.name)}</th><th></th></tr></thead><tbody>${bigRows}</tbody></table></div></div>
+    ${cards || '<p class="fine">이번 주는 돌아보는 주라 세부 점검이 없어요.</p>'}
+  </section>`;
+}
+
+function myOnlySummary(me) {
+  const ids = weekAreas(me);
+  if (!ids.length) return '';
+  return `<div class="card"><h2 class="h2">이번 주 살펴본 영역</h2>${ids.map((aid) => { const ar = areaById(aid); return `<p><strong>${esc(ar.name)}</strong><br><span class="fine">말씀 ${esc(ar.refs)} · 실천: ${esc(ar.practice)}</span></p>`; }).join('')}</div>`;
 }
 
 async function saveCheck(complete) {
   try {
-    await setDoc(doc(db, 'households', S.hid, 'assessments', periodKey(), 'answers', S.user.uid), {
-      uid: S.user.uid, scores: S.check.draft, completed: !!complete, updatedAt: serverTimestamp(),
+    await setDoc(doc(db, 'households', S.hid, 'assessments', weekKey(), 'answers', S.user.uid), {
+      uid: S.user.uid, scores: S.check.draft, extra: S.check.extra, na: S.check.na, hide: S.check.hide,
+      stage: S.check.stage, week: weekOfMonth(), completed: !!complete, updatedAt: serverTimestamp(),
     });
-    toast(complete ? '점검을 마쳤어요.' : '저장했어요.');
+    toast(complete ? '이번 주 점검을 마쳤어요.' : '저장했어요.');
     S.check.loaded = null; render();
   } catch (e) { fail(e); }
 }
@@ -949,6 +1032,16 @@ document.addEventListener('click', async (ev) => {
       try { await updateDoc(doc(db, 'households', S.hid), { [`stages.${S.user.uid}`]: Number(el.dataset.n) }); } catch (e) { fail(e); }
       return;
     case 'score': S.check.draft[el.dataset.q] = Number(el.dataset.v); return render();
+    case 'check-next':
+      if (weekOfMonth() > 4) return saveCheck(true);
+      S.check.stage = 2; window.scrollTo(0, 0); return render();
+    case 'check-back': S.check.stage = 1; window.scrollTo(0, 0); return render();
+    case 'add-area': if (!S.check.extra.includes(id)) S.check.extra.push(id); return render();
+    case 'toggle-na': S.check.na[id] = el.checked; return render();
+    case 'toggle-hide': S.check.hide = el.checked; return render();
+    case 'set-area-focus':
+      try { await updateDoc(doc(db, 'households', S.hid), { focus: { areaId: id, period: weekKey(), setBy: S.user.uid } }); toast('이번 주 집중 영역으로 정했어요.'); } catch (e) { fail(e); }
+      return;
     case 'save-check': return saveCheck(false);
     case 'submit-check': return saveCheck(true);
     case 'reload-check': S.check.loaded = null; return render();
